@@ -1,4 +1,5 @@
 import EventEmitter from 'events'
+import { cpus } from 'os'
 import { dirname, resolve } from 'path'
 import Tinypool from 'tinypool'
 import { fileURLToPath, pathToFileURL } from 'url'
@@ -184,22 +185,6 @@ test('isolateWorkers: true', async () => {
   expect(await pool.run({})).toBe(0)
 })
 
-test('workerId for each thread, that does not go more than maxThreads', async () => {
-  const pool = new Tinypool({
-    filename: resolve(__dirname, 'fixtures/workerId.js'),
-    isolateWorkers: true,
-    minThreads: 2,
-    maxThreads: 2,
-  })
-
-  expect(pool.run({ slow: true })).resolves.toBe(1)
-  expect(pool.run({ slow: false })).resolves.toBe(2)
-  expect(pool.run({ slow: true })).resolves.toBe(1)
-  expect(pool.run({ slow: true })).resolves.toBe(2)
-
-  await sleep(500)
-})
-
 test('workerId should never be more than maxThreads=1', async () => {
   const maxThreads = 1
   const pool = new Tinypool({
@@ -236,3 +221,45 @@ test('workerId should never be more than maxThreads', async () => {
 
   await sleep(300)
 })
+
+test('workerId should never be duplicated', async () => {
+  const maxThreads = cpus().length + 4
+  // console.log('maxThreads', maxThreads)
+  const pool = new Tinypool({
+    filename: resolve(__dirname, 'fixtures/workerId.js'),
+    isolateWorkers: true,
+    // challenge tinypool
+    maxThreads,
+  })
+  let duplicated = false
+  const workerIds: number[] = []
+
+  function addWorkerId(workerId: number) {
+    if (workerIds.includes(workerId)) {
+      duplicated = true
+      // console.log('fucked')
+    }
+    workerIds.push(workerId)
+  }
+
+  const createWorkerId = async (): Promise<number> => {
+    const result = await pool.run({})
+    addWorkerId(result)
+    return result
+  }
+
+  for (let i = 0; i < 20; i++) {
+    if (duplicated) {
+      continue
+    }
+    await Promise.all(
+      new Array(maxThreads - 2).fill(0).map(() => createWorkerId())
+    )
+    workerIds.length = 0
+
+    expect(duplicated).toBe(false)
+  }
+
+  await pool.destroy()
+  await sleep(5000)
+}, 30000)

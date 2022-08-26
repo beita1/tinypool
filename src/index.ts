@@ -417,6 +417,7 @@ const Errors = {
 class WorkerInfo extends AsynchronouslyCreatedResource {
   worker: Worker
   workerId: number
+  freeWorkerId: () => void
   taskInfos: Map<number, TaskInfo>
   idleTimeout: NodeJS.Timeout | null = null // eslint-disable-line no-undef
   port: MessagePort
@@ -428,11 +429,13 @@ class WorkerInfo extends AsynchronouslyCreatedResource {
     worker: Worker,
     port: MessagePort,
     workerId: number,
+    freeWorkerId: () => void,
     onMessage: ResponseCallback
   ) {
     super()
     this.worker = worker
     this.workerId = workerId
+    this.freeWorkerId = freeWorkerId
     this.port = port
     this.port.on('message', (message: ResponseMessage) =>
       this._handleResponse(message)
@@ -447,6 +450,7 @@ class WorkerInfo extends AsynchronouslyCreatedResource {
   destroy(): void {
     this.worker.terminate()
     this.port.close()
+    this.freeWorkerId()
     this.clearIdleTimeout()
     for (const taskInfo of this.taskInfos.values()) {
       taskInfo.done(Errors.ThreadTermination())
@@ -615,26 +619,11 @@ class ThreadPool {
   _addNewWorker(): void {
     const pool = this
     const workerIds = this.workerIds
-    const workers = [...this.workers.pendingItems, ...this.workers.pendingItems]
-
-    const isWorkerIdsCompatible =
-      [...workerIds.values()].filter((isIdAvailable) => isIdAvailable === false)
-        .length === this.workers.size
-
     const __dirname = dirname(fileURLToPath(import.meta.url))
 
     let workerId: number
 
     workerIds.forEach((isIdAvailable, _workerId) => {
-      if (!isWorkerIdsCompatible) {
-        const worker = workers.find((worker) => worker.workerId === _workerId)
-        if (!worker) {
-          // worker is available
-          workerIds.set(_workerId, true)
-          isIdAvailable = true
-        }
-      }
-
       if (isIdAvailable && !workerId) {
         workerId = _workerId
         workerIds.set(_workerId, false)
@@ -678,7 +667,13 @@ class ThreadPool {
     }
 
     const { port1, port2 } = new MessageChannel()
-    const workerInfo = new WorkerInfo(worker, port1, workerId!, onMessage)
+    const workerInfo = new WorkerInfo(
+      worker,
+      port1,
+      workerId!,
+      () => workerIds.set(workerId, true),
+      onMessage
+    )
     if (this.startingUp) {
       // There is no point in waiting for the initial set of Workers to indicate
       // that they are ready, we just mark them as such from the start.
@@ -749,7 +744,6 @@ class ThreadPool {
       // always .unref() the Worker itself. We want to receive e.g. 'error'
       // events on it, so we ref it once we know it's going to exit anyway.
       worker.ref()
-      workerIds.set(workerId, true)
     })
 
     this.workers.add(workerInfo)
@@ -978,6 +972,28 @@ class Tinypool extends EventEmitterAsyncResource {
   #pool: ThreadPool
 
   constructor(options: Options = {}) {
+    // convert fractional option values to int
+    if (
+      options.minThreads !== undefined &&
+      options.minThreads > 0 &&
+      options.minThreads < 1
+    ) {
+      options.minThreads = Math.max(
+        1,
+        Math.floor(options.minThreads * cpuCount)
+      )
+    }
+    if (
+      options.maxThreads !== undefined &&
+      options.maxThreads > 0 &&
+      options.maxThreads < 1
+    ) {
+      options.maxThreads = Math.max(
+        1,
+        Math.floor(options.maxThreads * cpuCount)
+      )
+    }
+
     super({ ...options, name: 'Tinypool' })
 
     if (
